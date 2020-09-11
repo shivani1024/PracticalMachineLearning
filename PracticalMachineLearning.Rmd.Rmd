@@ -1,0 +1,111 @@
+---
+title: "Predicting Weight-Lifting Performance"
+author: "Shivani Sawant"
+date: "September, 11 2020"
+output: html_document
+---
+
+## Overview
+
+This is a machine learning exercise designed to use fitness tracker measurements to classify how well users performed certain exercises. More information about the study this analysis uses can be found at [](http://groupware.les.inf.puc-rio.br/har). The analysis itself performs some data cleaning, then trains two different predictors to the training set. The second predictor, which uses the random forest method to train, turns out to have near-perfect accuracy.
+
+```{r libraries, echo=F, warning=F, message=F}
+library(caret)
+library(dplyr)
+library(randomForest)
+set.seed(46304)
+
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+```
+
+## Obtaining and Cleaning the Data
+
+The first step is to get the data: the [training set](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv) and the [testing set](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv).
+
+```{r download-files, echo=F, message=F}
+if (!file.exists('pml-training.csv')) {
+  download.file('http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv', 'pml-training.csv', method='auto');
+}
+if (!file.exists('pml-testing.csv')) {
+  download.file('http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv', 'pml-testing.csv', method='auto');
+}
+```
+
+```{r load-data, cache=TRUE}
+training <- read.csv('pml-training.csv')
+testing <- read.csv('pml-testing.csv')
+```
+
+If we look at the data summary, we see an inordinate amount of NAs in some columns. There are many columns with `r sum(sapply(training$max_roll_belt, function(x) length(which(is.na(x)))))` NAs, specifically. This corresponds exactly with the number of "No" values in the `new_window` column. After reading the paper the data was originally for, we find the researchers inserted these columns for each set of data, each time `new_window` was `Yes`, so they could do feature selection on it. I chose to drop these derived columns, both for speed and because I also chose to not treat the data as a time series.
+
+```{r clean-data, cache=TRUE}
+trimmedTraining <- training %>%
+  # Get rid of the summary statistic columns.
+  select(-grep("^(stddev_|var_|avg_|kurtosis_|total_|skewness_|max_|min_|amplitude)", names(training))) %>%
+  # Now get rid of the time series columns.
+  select(-raw_timestamp_part_1, -raw_timestamp_part_2, -cvtd_timestamp, -new_window, -num_window) %>%
+  # Eliminate the X and username columns because they have obvious spurious patterns.
+  select(-user_name, -X)
+# Do the same for the testing set.
+trimmedTesting <- testing %>%
+  select(-grep("^(stddev_|var_|avg_|kurtosis_|total_|skewness_|max_|min_|amplitude)", names(testing))) %>%
+  select(-raw_timestamp_part_1, -raw_timestamp_part_2, -cvtd_timestamp, -new_window, -num_window) %>%
+  select(-user_name, -X)
+```
+
+Now that the data is trimmed we can subset the data further. Since the actual testing set lacks the `classe` column we can't use it to estimate our out-of-sample error, so we have to create our own testing set from the training set. I used the typical 60% / 40% split for the size of the two sets.
+
+```{r subdivide-sets}
+inTrain <- createDataPartition(y = training$classe, p=0.6, list=F)
+localTraining <- trimmedTraining[inTrain,]
+localTesting <- trimmedTraining[-inTrain,]
+```
+
+## Selecting a Model & Crossvalidation
+
+Though it is tempting to start training with a simple linear model, the fact that the response variable is a factor rather than continuous means that isn't the wisest plan. Instead we can start with a simple classification tree, using the `rpart` method from caret's `train()`, predict results, and get an accuracy against the training set.
+
+```{r rpart} 
+classificationModel <- train(classe ~ ., data = localTraining, method="rpart")
+trainingPred <- predict(classificationModel, localTraining)
+confusionMatrix(trainingPred, localTraining$classe)$overall
+```
+
+49% accuracy. Literally worse than random chance. That was a total bust, so let's try amping things up with a random forest model. We'll use the `randomForest()` method instead of `train()` so it runs faster (i.e. within a minute instead of days).
+
+```{r rf} 
+rfModel <- randomForest(classe ~ ., data = localTraining)
+trainingPred <- predict(rfModel, localTraining)
+confusionMatrix(trainingPred, localTraining$classe)$overall
+```
+
+100%, on the other hand, is _very_ high - so much so that I'm worried about overtraining. Let's validate the model on the test data and see if that holds.
+
+```{r rf-test} 
+testPred <- predict(rfModel, localTesting)
+finalMatrix <- confusionMatrix(testPred, localTesting$classe)
+finalMatrix$overall[c(1,2)]
+```
+
+`r round(finalMatrix$overall[1],3) * 100`% accuracy is still very very good, so we can consider this a successful predictor. 
+
+### Out of Sample Error
+
+That means there's an out of sample error rate of `r round(1 - finalMatrix$overall[1], 3) * 100`%. 
+
+## Generating Validation Results
+
+We still have to generate results from the actual test data for submission, so let's do that now, first getting an list of predictions and then finally using the instructor-provided function.
+
+```{r generate-files}
+validationPred <- predict(rfModel, trimmedTesting)
+pml_write_files(validationPred)
+```
+
+The output of these predictions pass all 20 validation tests provided. The output itself is suppressed to avoid a Coursera Honor Code violation
